@@ -25,14 +25,16 @@ jobs:
         bundler-cache: true
     - name: Install dependencies
       run: bundle install
-    - name: Test and publish code coverage
-      run: bundle exec rake
-    - name: Upload coverage
+    - name: Prepare CodeClimate Reporter
       if: ${{ matrix.ruby == 2.7 && matrix.os == 'ubuntu-20.04' }}
-      uses: paambaati/codeclimate-action@v2.2.4
+      run: |
+        curl -L https://codeclimate.com/downloads/test-reporter/test-reporter-latest-linux-amd64 > ./cc-test-reporter
+        chmod +x ./cc-test-reporter
+        ./cc-test-reporter before-build
+    - name: Run RSpec
+      run: bundle exec rake
+    - name: Upload CodeClimate coverage
       env:
-        CC_TEST_REPORTER_ID: ${{ secrets.CC_TEST_REPORTER_ID }}
-      with:
-        coverageCommand: echo "Uploading coverage"
-        coverageLocations: ./coverage/.resultset.json:json
-        
+        CC_TEST_REPORTER_ID: ${{ secrets.CC_TEST_REPORTER_ID}}
+      if: ${{ matrix.ruby == 2.7 && matrix.os == 'ubuntu-20.04' }}
+      run: ./cc-test-reporter after-build
