@@ -25,12 +25,13 @@ jobs:
         bundler-cache: true
     - name: Install dependencies
       run: bundle install
-    - name: Run RSpec
+    - name: Test and publish code coverage
       run: bundle exec rake
     - name: Upload coverage
       if: ${{ matrix.ruby == 2.7 && matrix.os == 'ubuntu-20.04' }}
-      uses: codecov/codecov-action@v1
-      with:
-        token: ${{ secrets.CODECOV_TOKEN }}
-        file: ./coverage/.resultset.json
+      uses: paambaati/codeclimate-action@v2.2.4
+      env:
+        CC_TEST_REPORTER_ID: ${{ secrets.CC_TEST_REPORTER_ID }}
+      coverageCommand: echo "Uploading coverage"
+      coverageLocations: ./coverage/.resultset.json:json
         
