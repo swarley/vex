@@ -8,11 +8,9 @@ module Vox
     module Util
       # Remove members from a hash that have `:undef` as values
       # @example
-      #   ```ruby
       #   hash = { foo: 1, bar: :undef, baz: 2 }
       #   filter_hash(hash)
       #   # => { foo: 1, baz: 2 }
-      #   ```
       # @param hash [Hash] The hash to filter `:undef` members from.
       # @return [Hash] The given hash with all members with an `:undef` value removed.
       # @!visibility private

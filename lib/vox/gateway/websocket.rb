@@ -42,9 +42,6 @@ module Vox
       # Connect to the websocket server.
       # @return [Thread] The thread handling the read loop.
       def connect
-        # Maybe close and connect in the future instead?
-        raise 'Unable to connect while driver is open. Please `#close` first' if @driver && @driver.state != :closed
-
         # Flush the zlib buffer
         @inflate&.reset
 
@@ -55,14 +52,16 @@ module Vox
         setup_driver
 
         # Read until our websocket closes.
-        Thread.new { read_loop }
+        @thread = Thread.new do
+          read_loop
+        end
       end
 
       # Send a `text` message.
       # @param message [String] The `text` message to write to the websocket.
       # @return [true, false] Whether the message was sent successfully.
       def send(message)
-        LOGGER.info { "[OUT] #{message} " }
+        LOGGER.debug { "[OUT] #{message} " }
         @driver.text(message)
       end
 
@@ -107,6 +106,10 @@ module Vox
       # reports as closed.
       def read_loop
         read until @driver.state == :closed
+      rescue SystemCallError => e
+        LOGGER.error { "(#{e.class.name.split('::').last}) #{e.message}" }
+      rescue EOFError => e
+        LOGGER.error { 'EOF in websocket loop' }
       end
 
       def setup_driver
@@ -144,13 +147,12 @@ module Vox
 
       # Handle open events.
       def on_open(_event)
-        LOGGER.info { 'Connection open' }
+        LOGGER.debug { 'Connection open' }
         emit(:open)
       end
 
       # Handle parsed message events.
       def on_message(event)
-        LOGGER.debug { '[IN] Frame received' }
         data = if @inflate
                  packed = event.data.pack('c*')
                  @inflate << packed
@@ -167,7 +169,7 @@ module Vox
 
       # Handle close events.
       def on_close(event)
-        LOGGER.info { "WebSocket is closing (#{event.code}) #{event.reason}" }
+        LOGGER.debug { "WebSocket is closing (#{event.code}) #{event.reason}" }
         emit(:close, { code: event.code, reason: event.reason })
       end
 
