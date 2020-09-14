@@ -93,13 +93,7 @@ module Vox
 
       # Connect the websocket to the gateway.
       def connect(async: false)
-        @ws_thread = Thread.new do
-          loop do
-            @websocket.connect
-            @websocket.thread.join
-            break unless @should_reconnect.shift
-          end
-        end
+        @ws_thread = Thread.new { connect_loop }
         async ? @ws_thread : @ws_thread.join
       end
 
@@ -116,7 +110,6 @@ module Vox
       # @param op_code [Integer]
       # @param data [Hash]
       def send_packet(op_code, data)
-        LOGGER.debug { "Sending #{op_code.is_a?(Symbol) ? op_code : OPCODES[op_code]} #{data || 'nil'}" }
         if @encoding == :etf
           send_etf_packet(op_code, data)
         else
@@ -183,6 +176,16 @@ module Vox
         on(:READY, &method(:handle_ready))
       end
 
+      # Loop to continue connecting to the gateway
+      # until we hit an unrecoverable error.
+      def connect_loop
+        loop do
+          @websocket.connect
+          @websocket.thread.join
+          break unless @should_reconnect.shift
+        end
+      end
+
       # Create a URI from a gateway url and options
       # @param url [String]
       # @param port [Integer]
@@ -204,8 +207,8 @@ module Vox
       # @param op_code [Integer]
       # @param data [Hash]
       def send_json_packet(op_code, data)
+        LOGGER.debug { "Sending #{OPCODES[op_code]} #{data}" }
         payload = { op: op_code, d: data }
-
         @websocket.send_json(payload)
       end
 
@@ -213,6 +216,7 @@ module Vox
       # @param op_code [Integer]
       # @param data [Hash]
       def send_etf_packet(op_code, data)
+        LOGGER.debug { "Sending #{OPCODES[op_code]} #{data}" }
         payload = { op: op_code, d: data }
         @websocket.send_binary(Vox::ETF.encode(payload))
       end
