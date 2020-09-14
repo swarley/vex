@@ -1,18 +1,29 @@
 # frozen_string_literal: true
 
 require 'vox/gateway/websocket'
-# require 'logging'
+require 'logging'
 
 module Vox
   module Gateway
+    # A client for receiving and writing data from the gateway.
+    # The client uses an emitter pattern for emitting and registering events.
+    # @example
+    #   client.on(:MESSAGE_CREATE) do |payload|
+    #     puts "Hello!" if payload[:content] == "hello"
+    #   end
     class Client
       include EventEmitter
 
+      # @!visibility private
+      # The default properties for the identify packet
       DEFAULT_PROPERTIES = {
         '$os': Gem::Platform.local.os,
         '$browser': 'vox',
         '$device': 'vox'
       }.freeze
+
+      # @!visibility private
+      # A hash of opcodes => op_names, as well as op_names => opcodes.
       OPCODES = {
         0 => :DISPATCH,
         1 => :HEARTBEAT,
@@ -27,9 +38,15 @@ module Vox
         10 => :HELLO,
         11 => :HEARTBEAT_ACK
       }.tap { |ops| ops.merge!(ops.invert) }.freeze
-      GATEWAY_VERSION = '6'
 
+      # The gateway version to request.
+      GATEWAY_VERSION = '8'
+
+      # Class that holds information about a session.
       Session = Struct.new(:id, :seq)
+
+      # @return [Session] The connection's session information.
+      attr_reader :session
 
       # @param url [String] The url to use when connecting to the websocket. This can be
       #   retrieved from the API with {HTTP::Routes::Gateway#get_gateway_bot}.
@@ -45,11 +62,18 @@ module Vox
       def initialize(url:, token:, port: nil, encoding: :json, compress: true, shard: [0, 1],
                      properties: DEFAULT_PROPERTIES, large_threshold: nil, presence: nil, intents: nil)
         uri = create_gateway_uri(url, port: port, encoding: encoding, compress: compress)
-        
-        @encoding = encoding
-        raise ArgumentError, "Invalid gateway encoding" unless %i[json etf].include? @encoding
 
-        require 'vox/etf' if @encoding == :etf
+        @encoding = encoding
+        raise ArgumentError, 'Invalid gateway encoding' unless %i[json etf].include? @encoding
+
+        if @encoding == :etf
+          begin
+            require 'vox/etf'
+          rescue LoadError
+            Logging.logger[self].error { 'ETF parsing lib not found. Please install vox-etf to use ETF encoding.' }
+            raise Vox::Error.new('ETF lib not found')
+          end
+        end
 
         @websocket = WebSocket.new(uri.to_s, port: uri.port, compression: compress)
         @identify_opts = {
@@ -57,16 +81,35 @@ module Vox
           large_threshold: large_threshold, presence: presence, intents: intents
         }.compact
         @session = Session.new
-
+        @should_reconnect = Queue.new
         setup_handlers
       end
 
-      def connect
-        @websocket.connect
+      # @!method on(event, &block)
+      #   Register an event handler for a GATEWAY event, or DISPATCH event.
+      #   When registering an event corresponding to an opcode, the full payload
+      #   is yielded. When registering a DISPATCH type, only the data portion
+      #   of the payload is provided.
+
+      # Connect the websocket to the gateway.
+      def connect(async: false)
+        @ws_thread = Thread.new do
+          loop do
+            @websocket.connect
+            @websocket.thread.join
+            break unless @should_reconnect.shift
+          end
+        end
+        async ? @ws_thread : @ws_thread.join
       end
 
-      def join
-        @websocket.thread.join
+      # Close the websocket.
+      # @param code [Integer] The close code.
+      # @param reason [String] The reason for closing.
+      def close(reason = nil, code = 1000, reconnect: false)
+        @ws_thread.kill unless reconnect
+        @websocket.close(reason, code)
+        @websocket.thread.join unless reconnect
       end
 
       # Send a packet with the correct encoding. Only supports JSON currently.
@@ -74,13 +117,20 @@ module Vox
       # @param data [Hash]
       def send_packet(op_code, data)
         LOGGER.debug { "Sending #{op_code.is_a?(Symbol) ? op_code : OPCODES[op_code]} #{data || 'nil'}" }
-        if encoding == :etf
+        if @encoding == :etf
           send_etf_packet(op_code, data)
         else
           send_json_packet(op_code, data)
         end
       end
 
+      # Request a guild member chunk, used to build a member cache.
+      # @param guild_id [String, Integer]
+      # @param query
+      # @param limit [Integer]
+      # @param presences
+      # @param user_ids [Array<String, Integer>]
+      # @param nonce [String, Integer]
       def request_guild_members(guild_id, query: nil, limit: 0, presences: nil,
                                 user_ids: nil, nonce: nil)
         opts = {
@@ -91,7 +141,12 @@ module Vox
         send_packet(OPCODES[:REQUEST_GUILD_MEMBERS], opts)
       end
 
-      def voice_state_update(guild_id:, channel_id:, self_mute: false, self_deaf: false)
+      # Send a voice state update, used for establishing voice connections.
+      # @param guild_id [String, Integer]
+      # @param channel_id [String, Integer]
+      # @param self_mute [true, false]
+      # @param self_deaf [true, false]
+      def voice_state_update(guild_id, channel_id, self_mute: false, self_deaf: false)
         opts = {
           guild_id: guild_id, channel_id: channel_id, self_mute: self_mute,
           self_deaf: self_deaf
@@ -100,6 +155,11 @@ module Vox
         send_packet(OPCODES[:VOICE_STATE_UPDATE], opts)
       end
 
+      # Update the bot's status.
+      # @param status [String] The user's new status.
+      # @param afk [true, false] Whether or not the client is AFK.
+      # @param game [Hash<Symbol, Object>, nil] An [activity object](https://discord.com/developers/docs/topics/gateway#activity-object).
+      # @param since [Integer, nil] Unix time (in milliseconds) of when the client went idle.
       def presence_update(status:, afk: false, game: nil, since: nil)
         opts = { status: status, afk: afk, game: game, since: since }.compact
         send_packet(OPCODES[:PRESENCE_UPDATE], opts)
@@ -107,6 +167,7 @@ module Vox
 
       private
 
+      # Add internal event handlers
       def setup_handlers
         # Discord will contact us with HELLO first, so we don't need to hook into READY
         @websocket.on(:message, &method(:handle_message))
@@ -121,7 +182,6 @@ module Vox
         on(:HEARTBEAT_ACK, &method(:handle_heartbeat_ack))
         on(:READY, &method(:handle_ready))
       end
-
 
       # Create a URI from a gateway url and options
       # @param url [String]
@@ -149,9 +209,12 @@ module Vox
         @websocket.send_json(payload)
       end
 
+      # Send an ETF packet.
+      # @param op_code [Integer]
+      # @param data [Hash]
       def send_etf_packet(op_code, data)
         payload = { op: op_code, d: data }
-        @websocket.binary(Vox::ETF.encode(payload))
+        @websocket.send_binary(Vox::ETF.encode(payload))
       end
 
       # Send an identify payload to discord, beginning a new session.
@@ -159,6 +222,8 @@ module Vox
         send_packet(OPCODES[:IDENTIFY], @identify_opts)
       end
 
+      # Send a resume payload to discord, attempting to resume an existing
+      # session.
       def send_resume
         send_packet(OPCODES[:RESUME],
                     { token: @identify_opts[:token], session_id: @session.id, seq: @session.seq })
@@ -170,16 +235,16 @@ module Vox
         send_packet(OPCODES[:HEARTBEAT], @session.seq)
       end
 
-      # Loop for
+      # A loop that handles sending and receiving heartbeats from the gateway.
       def heartbeat_loop
         loop do
           send_heartbeat
           sleep @heartbeat_interval
-          unless @heartbeat_acked
-            LOGGER.error { 'Heartbeat was not acked, reconnecting.' }
-            @websocket.close
-            break
-          end
+          next if @heartbeat_acked
+
+          LOGGER.error { 'Heartbeat was not acked, reconnecting.' }
+          @websocket.close
+          break
         end
       end
 
@@ -195,7 +260,8 @@ module Vox
       ##################################
       ##################################
 
-      # Placeholder for when we can do etf
+      # Handle a message from the websocket.
+      # @param data [String] The message data.
       def handle_message(data)
         if @encoding == :etf
           handle_etf_message(data)
@@ -204,6 +270,8 @@ module Vox
         end
       end
 
+      # Handle an ETF message, decoding it and emitting an event.
+      # @param data [String] The ETF data.
       def handle_etf_message(data)
         data = Vox::ETF.decode(data)
         LOGGER.debug { "Emitting #{OPCODES[data[:op]]}" } if OPCODES[data[:op]] != :DISPATCH
@@ -214,6 +282,8 @@ module Vox
         emit(op, data)
       end
 
+      # Handle a JSON message, decoding it and emitting an event.
+      # @param json [String] The JSON data.
       def handle_json_message(json)
         data = MultiJson.load(json, symbolize_keys: true)
         # Don't announce DISPATCH events since we log it on the same level
@@ -226,11 +296,16 @@ module Vox
         emit(op, data)
       end
 
+      # Handle a dispatch event, extracting the event name and emitting an event.
+      # @param payload [Hash<Symbol, Object>] The decoded payload's `data` field.
       def handle_dispatch(payload)
         LOGGER.debug { "Emitting #{payload[:t]}" }
-        emit(payload[:t], payload)
+        emit(payload[:t], payload[:d])
       end
 
+      # Handle a hello event, beginning the heartbeat loop and identifying or
+      # resuming.
+      # @param payload [Hash<Symbol, Object>] The decoded payload.
       def handle_hello(payload)
         LOGGER.info { 'Connected' }
         @heartbeat_interval = payload[:d][:heartbeat_interval] / 1000
@@ -243,70 +318,58 @@ module Vox
       end
 
       # Fired if the gateway requests that we send a heartbeat.
+      # @param _payload [Object] The received payload, not used in this method.
       def handle_heartbeat(_payload)
         send_packet(OPCODES[:HEARTBEAT], @session.seq)
       end
 
+      # Set session information from the ready payload.
+      # @param payload [Object] The received ready payload.
       def handle_ready(payload)
-        @session.id = payload[:d][:session_id]
+        @session.id = payload[:session_id]
       end
 
+      # @param _payload [Object] The received payload, not used in this method.
       def handle_invalid_session(_payload)
         @session.seq = nil
         send_identify
       end
 
+      # @param _payload [Object] The received payload, not used in this method.
       def handle_reconnect(_payload)
         @websocket.close('Received reconnect', 4000)
       end
 
+      # Handle a heartbeat acknowledgement from the gateway.
+      # @param _payload [Object] The received payload, not used in this method.
       def handle_heartbeat_ack(_payload)
         @heartbeat_acked = true
       end
 
+      # Handle a close event from the websocket.
+      # @param data [Hash{:code => Integer, :reason => String}]
       def handle_close(data)
         LOGGER.warn { "Websocket closed (#{data[:code]} #{data[:reason]})" }
         @heartbeat_thread&.kill
-        should_reconnect = false
+        reconnect = true
 
         case data[:code]
-        when 4000
-          LOGGER.error { 'Disconnected from an unknown error.' }
-        when 4001
-          LOGGER.error { 'Sent an invalid opcode or payload.' }
-        when 4002
-          LOGGER.error { 'Sent a payload that could not be decoded.' }
-        when 4003
-          LOGGER.error { 'A payload was sent before identifying.' }
-        when 4004
-          LOGGER.error { 'An invalid token was used to identify.' }
-        when 4005
-          LOGGER.error { 'More than one identify was sent.' }
         # Invalid seq when resuming, or session timed out
         when 4007, 4009
           LOGGER.error { 'Invalid session, reconnecting.' }
           @session = Session.new
-          should_reconnect = true
-        when 4008
-          LOGGER.error { 'Gateway rate limit exceeded.' }
-        when 4010
-          LOGGER.fatal { 'Invalid shard sent when identifying' }
-        when 4011
-          LOGGER.fatal { 'Sharding is required, see https://discord.com/developers/docs/topics/gateway#sharding' }
-        when 4012
-          LOGGER.fatal { 'An invalid API version was used' }
-        when 4013
-          LOGGER.fatal { 'Invalid intents were supplied.' }
-        when 4014
-          LOGGER.fatal { 'A privileged intent which has not been enabled was supplied.' }
+        when 4003, 4004, 4011
+          LOGGER.fatal { data[:reason] }
+          reconnect = false
         else
-          should_reconnect = true
+          LOGGER.error { data[:reason] } if data[:reason]
         end
 
-        connect if should_reconnect
+        @should_reconnect << reconnect
       end
 
       # @!visibility private
+      # The logger for Vox::Gateway::Client
       LOGGER = Logging.logger[self]
     end
   end

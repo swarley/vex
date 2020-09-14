@@ -54,18 +54,6 @@ RSpec.describe Vox::Gateway::WebSocket do
         expect(ws).to have_received(:read_loop)
       end
     end
-
-    context 'when already connected' do
-      let(:ws) do
-        websocket = ws_with_driver
-        allow(websocket.driver).to receive(:state).and_return(:open)
-        websocket
-      end
-
-      it 'will error' do
-        expect { ws.connect }.to raise_error(RuntimeError)
-      end
-    end
   end
 
   describe '#write' do
@@ -236,6 +224,7 @@ RSpec.describe Vox::Gateway::WebSocket do
     end
 
     it 'emits a `message` event' do
+      allow(data).to receive(:[]).and_return('{')
       allow(ws).to receive(:emit).with(:message, data)
       ws.__send__(:on_message, event)
       expect(ws).to have_received(:emit).with(:message, data)
@@ -259,6 +248,7 @@ RSpec.describe Vox::Gateway::WebSocket do
       before { stub_const('ZLIB_SUFFIX', Vox::Gateway::WebSocket::ZLIB_SUFFIX) }
 
       it 'inflates the received data' do
+        allow(inflated_data).to receive(:[]).and_return('{')
         allow(str_data).to receive(:end_with?).with(ZLIB_SUFFIX).and_return true
         allow(ws).to receive(:emit).with(:message, inflated_data)
         ws.__send__(:on_message, event)
@@ -301,6 +291,16 @@ RSpec.describe Vox::Gateway::WebSocket do
     it 'calls read while the driver is not closed' do
       ws.__send__(:read_loop)
       expect(ws).to have_received(:read).once
+    end
+
+    it 'rescues from socket errors' do
+      allow(ws.driver).to receive(:state).and_raise(SystemCallError.new('socket error'))
+      expect { ws.__send__(:read_loop) }.not_to raise_error
+    end
+
+    it 'rescues from EOF errors' do
+      allow(ws.driver).to receive(:state).and_raise(EOFError.new)
+      expect { ws.__send__(:read_loop) }.not_to raise_error
     end
   end
 

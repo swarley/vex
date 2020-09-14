@@ -163,7 +163,7 @@ module Vox
                  event.data
                end
 
-        LOGGER.debug { "[IN] #{data}" }
+        LOGGER.debug { "[IN] #{data[0].ord == 131 ? data.inspect : data}" }
         emit(:message, data)
       end
 
