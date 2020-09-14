@@ -1,6 +1,6 @@
 # frozen_string_literal: true
 
 module Vox
-  # Overall gem version, each component also contains its own version
-  VERSION = '0.2.1'
+  # Gem version
+  VERSION = '0.2.2'
 end
