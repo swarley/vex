@@ -18,5 +18,8 @@ Style/RaiseArgs:
 RSpec/FilePath:
   SpecSuffixOnly: true
 
+RSpec/MultipleMemoizedHelpers:
+  Enabled: false
+
 Metrics:
   Enabled: false
