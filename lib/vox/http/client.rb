@@ -43,9 +43,11 @@ module Vox
         'User-Agent': "DiscordBot (https://github.com/swarley/vox, #{Vox::VERSION})"
       }.freeze
 
-      def initialize(token)
+      # @note The use of the positional token is deprecated and will be removed.
+      def initialize(depr_token = nil, token: nil, token_type: 'Bot')
+        token ||= depr_token
         @conn = default_connection
-        @conn.authorization('Bot', token.delete_prefix('Bot '))
+        @conn.authorization(token_type, token.delete_prefix("#{token_type} "))
         yield(@conn) if block_given?
       end
 

@@ -5,6 +5,9 @@ SimpleCov.start
 
 require 'bundler/setup'
 require 'vox'
+require 'vox/client'
+require 'vox/objects'
+require 'vox/cache'
 
 RSpec.configure do |config|
   # Enable flags like --only-failures and --next-failure
